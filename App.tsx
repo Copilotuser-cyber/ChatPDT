@@ -25,6 +25,7 @@ const App: React.FC = () => {
   const [broadcast, setBroadcast] = useState<string | null>(null);
   const [audioOverride, setAudioOverride] = useState<{ url: string; isPlaying: boolean } | null>(null);
   const [activePrank, setActivePrank] = useState<'rickroll' | 'stickbug' | null>(null);
+  const [syncLatency, setSyncLatency] = useState<number>(0);
   
   const [appSettings, setAppSettings] = useState<AppSettings>(() => {
     const saved = localStorage.getItem('app_visual_settings');
@@ -37,121 +38,118 @@ const App: React.FC = () => {
 
   const chatsRef = useRef<Chat[]>([]);
   const lastPrankRef = useRef<number>(0);
+  const lastGhostRef = useRef<number>(0);
 
   useEffect(() => { chatsRef.current = chats; }, [chats]);
 
-  // Device Signature Reporting
-  useEffect(() => {
-    if (!currentUser) return;
-    const getDeviceSignature = () => {
-      const ua = navigator.userAgent;
-      const platform = navigator.platform;
-      const screen = `${window.screen.width}x${window.screen.height}`;
-      let type = "Desktop";
-      if (/(tablet|ipad|playbook|silk)|(android(?!.*mobi))/i.test(ua)) type = "Tablet";
-      else if (/Mobile|Android|iP(hone|od)|IEMobile|BlackBerry|Kindle|Silk-Accelerated|(hpw|web)OS|Opera M(obi|ini)/.test(ua)) type = "Mobile";
-      return `${type} • ${platform} • ${screen}`;
-    };
-    storage.updateUser(currentUser.id, { lastDeviceInfo: getDeviceSignature() });
-  }, [currentUser]);
-
-  // Neural Shadow Link (Remote Overrides)
+  // Real-time Firebase Sync
   useEffect(() => {
     if (!currentUser) return;
 
-    const checkOverrides = () => {
-      const overrides = storage.getRemoteOverride(currentUser.id) as RemoteOverride;
-      if (overrides) {
-        if (overrides.appSettings) setAppSettings(prev => ({ ...prev, ...overrides.appSettings }));
-        if (overrides.theme) setTheme(overrides.theme);
-        if (overrides.config) setConfig(prev => ({ ...prev, ...overrides.config }));
+    // Listen for Chats
+    const unsubChats = storage.subscribeToUserChats(currentUser.id, (updatedChats) => {
+      setChats(updatedChats);
+      if (updatedChats.length > 0 && !activeChatId) {
+        setActiveChatId(updatedChats[0].id);
+      }
+    });
+
+    // Listen for Admin Overrides
+    const unsubOverrides = storage.subscribeToOverrides(currentUser.id, (overrides) => {
+      setSyncLatency(Math.abs(Date.now() - (overrides.timestamp || Date.now())));
+      
+      if (overrides.appSettings) setAppSettings(prev => ({ ...prev, ...overrides.appSettings }));
+      if (overrides.theme) setTheme(overrides.theme);
+      if (overrides.config) setConfig(prev => ({ ...prev, ...overrides.config }));
+      
+      if (overrides.audioMatrix) {
+        setAudioOverride({
+          url: overrides.audioMatrix.appleMusicUrl || '',
+          isPlaying: !!overrides.audioMatrix.isPlaying
+        });
+      }
+
+      if (overrides.visualMatrix) {
+        const { accentColor, borderRadius, fontType, filter } = overrides.visualMatrix;
+        let styleEl = document.getElementById('shadow-visual-matrix');
+        if (!styleEl) {
+          styleEl = document.createElement('style');
+          styleEl.id = 'shadow-visual-matrix';
+          document.head.appendChild(styleEl);
+        }
         
-        // Audio Matrix Hijack (Auto-play logic)
-        if (overrides.audioMatrix) {
-          setAudioOverride({
-            url: overrides.audioMatrix.appleMusicUrl || '',
-            isPlaying: !!overrides.audioMatrix.isPlaying
-          });
-        }
+        let fontStack = "'Inter', sans-serif";
+        if (fontType === 'mono') fontStack = "'Fira Code', monospace";
+        if (fontType === 'serif') fontStack = "serif";
+        if (fontType === 'comic') fontStack = "'Comic Sans MS', cursive";
+        if (fontType === 'futuristic') fontStack = "'Orbitron', sans-serif";
 
-        // Visual Matrix Hijack
-        if (overrides.visualMatrix) {
-          const { accentColor, borderRadius, fontType, filter } = overrides.visualMatrix;
-          let styleEl = document.getElementById('shadow-visual-matrix');
-          if (!styleEl) {
-            styleEl = document.createElement('style');
-            styleEl.id = 'shadow-visual-matrix';
-            document.head.appendChild(styleEl);
+        styleEl.innerHTML = `
+          :root {
+            --indigo-600: ${accentColor || '#4f46e5'} !important;
+            --indigo-50: ${accentColor}11 !important;
           }
-          
-          let fontStack = "'Inter', sans-serif";
-          if (fontType === 'mono') fontStack = "'Fira Code', monospace";
-          if (fontType === 'serif') fontStack = "serif";
-          if (fontType === 'comic') fontStack = "'Comic Sans MS', cursive";
-          if (fontType === 'futuristic') fontStack = "'Orbitron', sans-serif";
+          .chat-bubble, .rounded-xl, .rounded-2xl, button, input, textarea, select {
+            border-radius: ${borderRadius || '1rem'} !important;
+          }
+          body {
+            font-family: ${fontStack} !important;
+            filter: ${filter || 'none'} !important;
+          }
+        `;
+      }
 
-          styleEl.innerHTML = `
-            :root {
-              --indigo-600: ${accentColor || '#4f46e5'} !important;
-              --indigo-50: ${accentColor}11 !important;
-            }
-            .chat-bubble, .rounded-xl, .rounded-2xl, button, input, textarea, select {
-              border-radius: ${borderRadius || '1rem'} !important;
-            }
-            body {
-              font-family: ${fontStack} !important;
-              filter: ${filter || 'none'} !important;
-            }
-            .premium-aura {
-              box-shadow: 0 0 25px ${accentColor || '#f59e0b'}55 !important;
-            }
-          `;
-        }
+      if (overrides.prank && overrides.prank.type && overrides.prank.triggeredAt > lastPrankRef.current) {
+        lastPrankRef.current = overrides.prank.triggeredAt;
+        setActivePrank(overrides.prank.type);
+        setTimeout(() => setActivePrank(null), 10000);
+      }
 
-        // Prank Hijack (Full screen overlay for 10s)
-        if (overrides.prank && overrides.prank.type && overrides.prank.triggeredAt > lastPrankRef.current) {
-          lastPrankRef.current = overrides.prank.triggeredAt;
-          setActivePrank(overrides.prank.type);
-          setTimeout(() => setActivePrank(null), 10000);
+      // Ghost Protocol Hijack
+      if (overrides.ghostPayload && overrides.ghostPayload.timestamp > lastGhostRef.current) {
+        lastGhostRef.current = overrides.ghostPayload.timestamp;
+        const ghostText = overrides.ghostPayload.text;
+        const currentId = activeChatId;
+        if (currentId && ghostText) {
+          const ghostMsg: Message = {
+            id: Date.now().toString(),
+            userId: currentUser.id,
+            role: Role.MODEL,
+            text: ghostText,
+            timestamp: new Date().toISOString()
+          };
+          // We don't update local state directly here as the saveChat call will trigger the sub listener
+          const chatToUpdate = chatsRef.current.find(c => c.id === currentId);
+          if (chatToUpdate) {
+            storage.saveChat({ ...chatToUpdate, messages: [...chatToUpdate.messages, ghostMsg], updatedAt: new Date().toISOString() });
+          }
         }
       }
+    });
+
+    return () => {
+      unsubChats();
+      unsubOverrides();
     };
+  }, [currentUser, activeChatId]);
 
-    const interval = setInterval(checkOverrides, 2000);
-    return () => clearInterval(interval);
-  }, [currentUser]);
-
-  useEffect(() => {
-    const root = window.document.documentElement;
-    if (theme === 'dark') root.classList.add('dark');
-    else root.classList.remove('dark');
-    localStorage.setItem('app_theme', theme);
-  }, [theme]);
-
+  // Persist Auth
   useEffect(() => {
     const saved = localStorage.getItem('gemini_active_user');
-    const globalBroadcast = localStorage.getItem('system_broadcast');
-    if (globalBroadcast) setBroadcast(globalBroadcast);
-
     if (saved) {
       const user = JSON.parse(saved);
-      const latestUser = storage.getUsers().find(u => u.id === user.id) || user;
-      if (latestUser.isBanned) { handleLogout(); return; }
-      setCurrentUser(latestUser);
-      const userChats = storage.getUserChats(user.id);
-      setChats(userChats);
-      if (userChats.length > 0) setActiveChatId(userChats[0].id);
-      else handleNewChat(user.id);
+      // Verify account status from Firebase
+      storage.getUsers().then(users => {
+        const latest = users.find(u => u.id === user.id);
+        if (!latest || latest.isBanned) handleLogout();
+        else setCurrentUser(latest);
+      });
     }
   }, []);
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
     localStorage.setItem('gemini_active_user', JSON.stringify(user));
-    const userChats = storage.getUserChats(user.id);
-    setChats(userChats);
-    if (userChats.length > 0) setActiveChatId(userChats[0].id);
-    else handleNewChat(user.id);
   };
 
   const handleLogout = () => {
@@ -162,82 +160,56 @@ const App: React.FC = () => {
     document.getElementById('shadow-visual-matrix')?.remove();
   };
 
-  const handleNewChat = (userIdOverride?: string) => {
-    const uid = userIdOverride || currentUser?.id;
-    if (!uid) return;
+  const handleNewChat = () => {
+    if (!currentUser) return;
     const newChat: Chat = {
       id: Date.now().toString(),
-      userId: uid,
+      userId: currentUser.id,
       title: 'New Conversation',
       messages: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
-    setChats(prev => [newChat, ...prev]);
-    setActiveChatId(newChat.id);
     storage.saveChat(newChat);
+    setActiveChatId(newChat.id);
   };
-
-  const initChat = useCallback(async () => {
-    if (!currentUser || !activeChatId) return;
-    try {
-      const chat = storage.getChat(activeChatId);
-      await geminiService.startNewChat(config, chat?.messages || []);
-    } catch (error) {
-      console.error("Initialization failed:", error);
-    }
-  }, [config, currentUser, activeChatId]);
-
-  useEffect(() => {
-    initChat();
-  }, [initChat]);
 
   const handleSendMessage = async (text: string) => {
     if (!currentUser || !activeChatId) return;
+    const activeChat = chats.find(c => c.id === activeChatId);
+    if (!activeChat) return;
+
     const userMessage: Message = { id: Date.now().toString(), userId: currentUser.id, role: Role.USER, text, timestamp: new Date().toISOString() };
-    setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, messages: [...c.messages, userMessage], updatedAt: new Date().toISOString() } : c));
+    const updatedMessages = [...activeChat.messages, userMessage];
+    
+    // Optimistic Update and Sync
+    setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, messages: updatedMessages } : c));
     setIsLoading(true);
 
     try {
       const modelMessageId = (Date.now() + 1).toString();
       let streamedText = '';
-      const modelMessagePlaceholder: Message = { id: modelMessageId, userId: currentUser.id, role: Role.MODEL, text: '', timestamp: new Date().toISOString() };
       
-      setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, messages: [...c.messages, modelMessagePlaceholder] } : c));
-
       const stream = geminiService.sendMessageStream(text);
       for await (const chunk of stream) {
         streamedText += chunk;
-        setChats(prev => prev.map(c => c.id === activeChatId ? { ...c, messages: c.messages.map(m => m.id === modelMessageId ? { ...m, text: streamedText } : m) } : c));
+        setChats(prev => prev.map(c => c.id === activeChatId ? { 
+          ...c, 
+          messages: [...updatedMessages, { id: modelMessageId, userId: currentUser.id, role: Role.MODEL, text: streamedText, timestamp: new Date().toISOString() }] 
+        } : c));
       }
 
-      setChats(prev => {
-        const targetChat = prev.find(c => c.id === activeChatId);
-        if (targetChat) {
-          storage.saveChat(targetChat);
-          if (targetChat.messages.length <= 2) geminiService.generateChatTitle(text).then(title => handleRenameChat(activeChatId, title));
-        }
-        return prev;
-      });
+      // Final persistence
+      const finalMessages = [...updatedMessages, { id: modelMessageId, userId: currentUser.id, role: Role.MODEL, text: streamedText, timestamp: new Date().toISOString() }];
+      storage.saveChat({ ...activeChat, messages: finalMessages, updatedAt: new Date().toISOString() });
+      
+      if (activeChat.messages.length <= 1) {
+        const title = await geminiService.generateChatTitle(text);
+        storage.saveChat({ ...activeChat, messages: finalMessages, title, updatedAt: new Date().toISOString() });
+      }
     } catch (error) { 
-      console.error("Stream Error:", error);
-      // Fallback message on initialization error
-      setChats(prev => prev.map(c => c.id === activeChatId ? { 
-        ...c, 
-        messages: c.messages.map(m => m.text === '' ? { ...m, text: "Interface error: Neural link failed to initialize. Please try again." } : m) 
-      } : c));
-    } finally { 
-      setIsLoading(false); 
-    }
-  };
-
-  const handleRenameChat = (id: string, title: string) => {
-    const chat = chatsRef.current.find(c => c.id === id);
-    if (chat) {
-      const updated = { ...chat, title, updatedAt: new Date().toISOString() };
-      setChats(prev => prev.map(c => c.id === id ? updated : c));
-      storage.saveChat(updated);
-    }
+      console.error(error);
+    } finally { setIsLoading(false); }
   };
 
   if (!currentUser) return <AuthView onLogin={handleLogin} />;
@@ -245,47 +217,16 @@ const App: React.FC = () => {
 
   return (
     <div className={`flex h-screen w-full overflow-hidden ${theme} relative transition-colors duration-500`}>
-      
-      {/* PRANK OVERLAY (Full screen, 10 seconds) */}
+      {/* Prank Overlays */}
       {activePrank && (
         <div className="fixed inset-0 z-[1000] bg-black flex items-center justify-center animate-fade-in">
-          <iframe 
-            className="w-full h-full border-none"
-            src={activePrank === 'rickroll' 
-              ? "https://www.youtube.com/embed/dQw4w9WgXcQ?autoplay=1&controls=0&mute=0" 
-              : "https://www.youtube.com/embed/fC7oUOUEEi4?autoplay=1&controls=0&mute=0"} 
-            allow="autoplay"
-          ></iframe>
+          <iframe className="w-full h-full border-none" src={activePrank === 'rickroll' ? "https://www.youtube.com/embed/dQw4w9WgXcQ?autoplay=1&controls=0&mute=0" : "https://www.youtube.com/embed/fC7oUOUEEi4?autoplay=1&controls=0&mute=0"} allow="autoplay"></iframe>
         </div>
       )}
 
-      {/* Audio Hijack Layer (Auto-playing Apple Music) */}
-      {audioOverride?.isPlaying && audioOverride.url && (
-        <div className="fixed bottom-4 right-4 z-[200] w-72 h-32 animate-fade-in pointer-events-auto">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-md rounded-2xl border border-white/10 overflow-hidden shadow-2xl">
-            <div className="absolute top-1 left-3 text-[7px] text-white/40 font-black uppercase tracking-widest z-10">Neural Audio Hijack</div>
-            <iframe 
-              allow="autoplay *; encrypted-media *; fullscreen *; clipboard-write" 
-              frameBorder="0" 
-              height="150" 
-              style={{ width: '100%', maxWidth: '660px', overflow: 'hidden', borderRadius: '10px' }} 
-              sandbox="allow-forms allow-popups allow-same-origin allow-scripts allow-storage-access-by-user-activation allow-top-navigation-by-user-activation" 
-              src={`${audioOverride.url.replace('music.apple.com', 'embed.music.apple.com')}${audioOverride.url.includes('?') ? '&' : '?'}autoplay=1`}
-            ></iframe>
-          </div>
-        </div>
-      )}
-
+      {/* Background Layer */}
       {appSettings.backgroundUrl && (
-        <div 
-          className="fixed inset-0 z-0 transition-all duration-1000 bg-no-repeat bg-cover bg-center"
-          style={{
-            backgroundImage: `url("${appSettings.backgroundUrl}")`,
-            filter: `blur(${appSettings.backgroundBlur}px) brightness(${theme === 'dark' ? '0.5' : '0.8'})`,
-            opacity: appSettings.backgroundOpacity / 100,
-            transform: 'scale(1.1)'
-          }}
-        />
+        <div className="fixed inset-0 z-0 transition-all duration-1000 bg-no-repeat bg-cover bg-center" style={{ backgroundImage: `url("${appSettings.backgroundUrl}")`, filter: `blur(${appSettings.backgroundBlur}px) brightness(${theme === 'dark' ? '0.5' : '0.8'})`, opacity: appSettings.backgroundOpacity / 100, transform: 'scale(1.1)' }} />
       )}
 
       <div className="flex h-full w-full dark:bg-slate-950/70 bg-white/70 backdrop-blur-sm z-10">
@@ -294,25 +235,30 @@ const App: React.FC = () => {
           user={currentUser} onLogout={handleLogout} onOpenAdmin={() => setIsAdminPanelOpen(true)}
           onOpenGames={() => setIsGameForgeOpen(true)} theme={theme} onToggleTheme={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
           appSettings={appSettings} setAppSettings={setAppSettings} chats={chats} activeChatId={activeChatId}
-          onSelectChat={id => { setActiveChatId(id); setIsSidebarOpen(false); }} onNewChat={() => handleNewChat()}
-          onDeleteChat={id => { storage.deleteChat(id); setChats(prev => prev.filter(c => c.id !== id)); }}
-          onRenameChat={handleRenameChat}
+          onSelectChat={setActiveChatId} onNewChat={handleNewChat}
+          onDeleteChat={storage.deleteChat}
+          onRenameChat={(id, title) => {
+            const chat = chats.find(c => c.id === id);
+            if (chat) storage.saveChat({ ...chat, title, updatedAt: new Date().toISOString() });
+          }}
         />
-
         <main className="flex-1 flex flex-col min-w-0 h-full relative">
-          {broadcast && (
-            <div className="bg-indigo-600 text-white p-2 text-center text-[10px] font-black uppercase tracking-widest animate-pulse z-20 shadow-lg">
-              System Broadcast: {broadcast}
-            </div>
-          )}
-          <ChatWindow 
-            messages={activeChat?.messages || []} isLoading={isLoading} onSendMessage={handleSendMessage} 
-            onStartVoice={() => setIsLiveMode(true)} isPremium={currentUser.isPremium}
-          />
+          <div className="flex items-center justify-between px-6 py-2 border-b dark:border-slate-800 border-slate-200 bg-white/10 dark:bg-slate-900/10">
+             <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]"></div>
+                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">Neural Net Linked</span>
+                </div>
+                <div className="text-[9px] font-bold text-slate-400 border-l dark:border-slate-800 border-slate-200 pl-3">
+                  Sync: {syncLatency}ms
+                </div>
+             </div>
+             {broadcast && <div className="text-[9px] font-black uppercase tracking-widest text-indigo-500 animate-pulse">Broadcast: {broadcast}</div>}
+          </div>
+          <ChatWindow messages={activeChat?.messages || []} isLoading={isLoading} onSendMessage={handleSendMessage} onStartVoice={() => setIsLiveMode(true)} isPremium={currentUser.isPremium} />
         </main>
-
         {isLiveMode && <LiveVoiceOverlay onClose={() => setIsLiveMode(false)} systemInstruction={config.systemInstruction} />}
-        {isAdminPanelOpen && <AdminPanel onClose={() => { setIsAdminPanelOpen(false); setBroadcast(localStorage.getItem('system_broadcast')); }} />}
+        {isAdminPanelOpen && <AdminPanel onClose={() => setIsAdminPanelOpen(false)} />}
         {isGameForgeOpen && <GameForge onClose={() => setIsGameForgeOpen(false)} userId={currentUser.id} />}
       </div>
     </div>
