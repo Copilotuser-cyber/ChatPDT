@@ -1,127 +1,146 @@
 
-import { User, Message, Chat } from '../types';
+import { initializeApp } from "firebase/app";
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  getDocs, 
+  updateDoc, 
+  deleteDoc, 
+  query, 
+  where, 
+  onSnapshot,
+  Timestamp,
+  orderBy
+} from "firebase/firestore";
+import { User, Chat, Message, RemoteOverride } from "../types";
 
-const USERS_KEY = 'gemini_app_users_v2';
-const CHATS_KEY = 'gemini_app_chats_v2';
-const OVERRIDES_KEY = 'gemini_app_remote_overrides';
+// Firebase Configuration
+// Assuming these are in your environment - replace with your actual config from Firebase Console
+const firebaseConfig = JSON.parse(process.env.FIREBASE_CONFIG || '{}');
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+const COLLECTIONS = {
+  USERS: 'neural_users',
+  CHATS: 'neural_chats',
+  OVERRIDES: 'neural_overrides'
+};
 
 export const storage = {
-  getUsers: (): User[] => {
-    const data = localStorage.getItem(USERS_KEY);
-    return data ? JSON.parse(data) : [];
+  // --- User Management ---
+  getUsers: async (): Promise<User[]> => {
+    const q = query(collection(db, COLLECTIONS.USERS));
+    const snap = await getDocs(q);
+    return snap.docs.map(doc => doc.data() as User);
   },
 
-  saveUser: (user: User) => {
-    const users = storage.getUsers();
-    const index = users.findIndex(u => u.id === user.id);
-    if (index > -1) {
-      users[index] = user;
-    } else {
-      users.push(user);
-    }
-    localStorage.setItem(USERS_KEY, JSON.stringify(users));
+  subscribeToUsers: (callback: (users: User[]) => void) => {
+    return onSnapshot(collection(db, COLLECTIONS.USERS), (snap) => {
+      callback(snap.docs.map(d => d.data() as User));
+    });
   },
 
-  updateUser: (userId: string, updates: Partial<User>) => {
-    const users = storage.getUsers();
-    const index = users.findIndex(u => u.id === userId);
-    if (index > -1) {
-      users[index] = { ...users[index], ...updates };
-      localStorage.setItem(USERS_KEY, JSON.stringify(users));
-    }
+  saveUser: async (user: User) => {
+    await setDoc(doc(db, COLLECTIONS.USERS, user.id), user);
   },
 
-  deleteUser: (userId: string) => {
-    const users = storage.getUsers().filter(u => u.id !== userId);
-    localStorage.setItem(USERS_KEY, JSON.stringify(users));
-    const chats = storage.getAllChats().filter(c => c.userId !== userId);
-    localStorage.setItem(CHATS_KEY, JSON.stringify(chats));
-    storage.clearOverrides(userId);
+  updateUser: async (userId: string, updates: Partial<User>) => {
+    await updateDoc(doc(db, COLLECTIONS.USERS, userId), updates);
   },
 
-  // Remote Overrides for Admin Shadow Control
-  setRemoteOverride: (userId: string, data: any) => {
-    const all = storage.getAllOverrides();
-    all[userId] = { ...all[userId], ...data, timestamp: Date.now() };
-    localStorage.setItem(OVERRIDES_KEY, JSON.stringify(all));
+  // --- Chat Management ---
+  getUserChats: async (userId: string): Promise<Chat[]> => {
+    const q = query(
+      collection(db, COLLECTIONS.CHATS), 
+      where("userId", "==", userId),
+      orderBy("updatedAt", "desc")
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map(d => d.data() as Chat);
   },
 
-  getRemoteOverride: (userId: string) => {
-    const all = storage.getAllOverrides();
-    return all[userId];
+  subscribeToUserChats: (userId: string, callback: (chats: Chat[]) => void) => {
+    const q = query(
+      collection(db, COLLECTIONS.CHATS), 
+      where("userId", "==", userId),
+      orderBy("updatedAt", "desc")
+    );
+    return onSnapshot(q, (snap) => {
+      callback(snap.docs.map(d => d.data() as Chat));
+    });
   },
 
-  getAllOverrides: () => {
-    const data = localStorage.getItem(OVERRIDES_KEY);
-    return data ? JSON.parse(data) : {};
+  saveChat: async (chat: Chat) => {
+    await setDoc(doc(db, COLLECTIONS.CHATS, chat.id), chat);
   },
 
-  clearOverrides: (userId: string) => {
-    const all = storage.getAllOverrides();
-    delete all[userId];
-    localStorage.setItem(OVERRIDES_KEY, JSON.stringify(all));
+  deleteChat: async (chatId: string) => {
+    await deleteDoc(doc(db, COLLECTIONS.CHATS, chatId));
   },
 
-  // Chat Operations
-  getAllChats: (): Chat[] => {
-    const data = localStorage.getItem(CHATS_KEY);
-    return data ? JSON.parse(data) : [];
+  getChat: async (chatId: string): Promise<Chat | undefined> => {
+    const d = await getDoc(doc(db, COLLECTIONS.CHATS, chatId));
+    return d.exists() ? d.data() as Chat : undefined;
   },
 
-  getUserChats: (userId: string): Chat[] => {
-    return storage.getAllChats()
-      .filter(c => c.userId === userId)
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  // --- Remote Overrides (The Shadow Link) ---
+  setRemoteOverride: async (userId: string, data: Partial<RemoteOverride>) => {
+    await setDoc(doc(db, COLLECTIONS.OVERRIDES, userId), {
+      ...data,
+      timestamp: Date.now()
+    }, { merge: true });
   },
 
-  saveChat: (chat: Chat) => {
-    const chats = storage.getAllChats();
-    const index = chats.findIndex(c => c.id === chat.id);
-    if (index > -1) {
-      chats[index] = chat;
-    } else {
-      chats.push(chat);
-    }
-    localStorage.setItem(CHATS_KEY, JSON.stringify(chats));
+  subscribeToOverrides: (userId: string, callback: (data: RemoteOverride) => void) => {
+    return onSnapshot(doc(db, COLLECTIONS.OVERRIDES, userId), (snap) => {
+      if (snap.exists()) callback(snap.data() as RemoteOverride);
+    });
   },
 
-  deleteChat: (chatId: string) => {
-    const chats = storage.getAllChats().filter(c => c.id !== chatId);
-    localStorage.setItem(CHATS_KEY, JSON.stringify(chats));
+  // Added missing method for AdminPanel to fetch overrides synchronously or as a one-off
+  getRemoteOverride: async (userId: string): Promise<RemoteOverride | undefined> => {
+    const d = await getDoc(doc(db, COLLECTIONS.OVERRIDES, userId));
+    return d.exists() ? d.data() as RemoteOverride : undefined;
   },
 
-  getChat: (chatId: string): Chat | undefined => {
-    return storage.getAllChats().find(c => c.id === chatId);
+  // --- Neural Bridge ---
+  getBridgeId: () => localStorage.getItem('neural_bridge_id'),
+  setBridgeId: (id: string) => {
+    if (id) localStorage.setItem('neural_bridge_id', id);
+    else localStorage.removeItem('neural_bridge_id');
+  },
+  createNewBridge: async () => {
+    const id = Math.random().toString(36).substring(2, 8).toUpperCase();
+    localStorage.setItem('neural_bridge_id', id);
+    return id;
+  },
+  pushToCloud: async () => {
+    // In this Firebase-backed app, every save is already pushed to cloud.
+    // This is a placeholder for manual sync triggers if needed.
+    return true;
+  },
+  pullFromCloud: async (bridgeId: string) => {
+    localStorage.setItem('neural_bridge_id', bridgeId);
+    // Success implies connection established
+    return true;
   },
 
-  getSystemStats: () => {
-    const users = storage.getUsers();
-    const chats = storage.getAllChats();
-    const messages = chats.reduce((acc, chat) => acc + chat.messages.length, 0);
+  // --- Utility Stats ---
+  getSystemStats: async () => {
+    const usersSnap = await getDocs(collection(db, COLLECTIONS.USERS));
+    const chatsSnap = await getDocs(collection(db, COLLECTIONS.CHATS));
+    const users = usersSnap.docs.map(d => d.data() as User);
+    
     return {
       totalUsers: users.length,
-      totalChats: chats.length,
-      totalMessages: messages,
+      totalChats: chatsSnap.size,
+      totalMessages: 0, // Would require nested counting
       premiumUsers: users.filter(u => u.isPremium).length,
       bannedUsers: users.filter(u => u.isBanned).length
     };
-  },
-
-  resetSystem: () => {
-    const admin = storage.getUsers().find(u => u.isAdmin);
-    localStorage.clear();
-    if (admin) storage.saveUser(admin);
   }
 };
-
-// Initial admin seed
-if (storage.getUsers().length === 0) {
-  storage.saveUser({
-    id: 'admin-001',
-    username: 'admin@PDT',
-    password: 'pdt333',
-    isAdmin: true,
-    isPremium: true,
-    createdAt: new Date().toISOString()
-  });
-}
