@@ -1,0 +1,8 @@
+{
+  "name": "Gemini Flash Pro",
+  "description": "The ultimate sovereign neural interface. AI chat, Game Forge, and Live Voice protocol.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
